@@ -1,0 +1,5 @@
+чтобы запустить
+
+./.venv/Scripts/activate
+python -m application.src.main
+deactivate

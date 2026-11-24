@@ -1,0 +1,25 @@
+
+# Основной графический интерфейс
+PySide6
+
+# Работа с данными
+numpy
+pandas
+
+# Машинное обучение
+scikit-learn
+joblib
+
+# Графики
+pyqtgraph
+matplotlib
+
+# Обработка документации
+PyMuPDF
+ezdxf
+openpyxl
+python-docx
+Pillow
+
+# Сборка EXE (понадобится позднее)
+pyinstaller
