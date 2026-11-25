@@ -1,214 +1,531 @@
-import csv
+
 import json
 import sqlite3
 
-from contextlib import contextmanager
 from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DATABASE_DIR = PROJECT_ROOT / "data" / "experiments"
-DATABASE_PATH = DATABASE_DIR / "measurements.db"
+from datetime import datetime
 
 
 class MeasurementLogger:
-    """Хранение экспериментальных измерений виртуального станка."""
+    """
+    Журнал результатов контроля качества.
 
-    COLUMNS = (
-        "timestamp", "measurement_id", "product_id", "part_type",
-        "material", "operation", "tool_id", "spindle_speed",
-        "feed_rate", "cutting_depth", "temperature", "vibration",
-        "spindle_load", "tool_wear", "diagnosis_status",
-        "diagnosis_reasons", "recommendations", "active_faults",
-        "experiment_id",
-    )
-
-    INSERT_SQL = """
-        INSERT INTO measurements (
-            timestamp, measurement_id, product_id, part_type, material,
-            operation, tool_id, spindle_speed, feed_rate, cutting_depth,
-            temperature, vibration, spindle_load, tool_wear,
-            diagnosis_status, diagnosis_reasons, recommendations,
-            active_faults, experiment_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    Сохраняет:
+    - изделие и номер экземпляра;
+    - измеренные характеристики;
+    - статус контроля и обнаруженные дефекты;
+    - сведения об искусственно внесённых дефектах;
+    - идентификаторы эксперимента и запуска;
+    - дату и время обработки.
     """
 
-    def __init__(self, database_path=None):
-        self.database_path = Path(database_path or DATABASE_PATH)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path=None):
+
+        if db_path is None:
+            project_root = Path(__file__).resolve().parents[3]
+
+            db_path = (
+                project_root
+                / "data"
+                / "quality"
+                / "measurements.db"
+            )
+
+        self.db_path = Path(db_path)
+
+        self.db_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         self.initialize_database()
 
-    def _connect(self):
-        connection = sqlite3.connect(self.database_path, timeout=30)
+    # ---------------------------------------------------------
+    # ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
+    # ---------------------------------------------------------
+
+    def get_connection(self):
+        connection = sqlite3.connect(
+            str(self.db_path),
+            timeout=30,
+        )
+
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+
         return connection
 
-    @contextmanager
-    def _connection(self):
-        connection = self._connect()
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
-
     def initialize_database(self):
-        with self._connection() as connection:
+        """Создаёт таблицу и обновляет её структуру при необходимости."""
+
+        with self.get_connection() as connection:
+
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS measurements (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    measurement_id INTEGER,
-                    product_id TEXT,
-                    part_type TEXT,
-                    material TEXT,
-                    operation TEXT,
-                    tool_id TEXT,
-                    spindle_speed REAL,
-                    feed_rate REAL,
-                    cutting_depth REAL,
-                    temperature REAL,
-                    vibration REAL,
-                    spindle_load REAL,
-                    tool_wear REAL,
-                    diagnosis_status TEXT,
-                    diagnosis_reasons TEXT,
-                    recommendations TEXT,
-                    active_faults TEXT,
-                    experiment_id TEXT
+                    product_id INTEGER NOT NULL,
+                    item_id INTEGER,
+                    measurements_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    defects_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    simulated_defect INTEGER NOT NULL DEFAULT 0,
+                    injected_defects_json TEXT NOT NULL DEFAULT '[]',
+                    experiment_id TEXT,
+                    run_id TEXT,
+                    created_at TEXT NOT NULL
                 )
             """)
 
-            columns = {
+            existing_columns = {
                 row["name"]
                 for row in connection.execute(
                     "PRAGMA table_info(measurements)"
                 ).fetchall()
             }
-            if "experiment_id" not in columns:
-                connection.execute("""
-                    ALTER TABLE measurements ADD COLUMN experiment_id TEXT
-                """)
+
+            # Миграция старой базы данных.
+            migrations = {
+                "injected_defects_json": (
+                    "ALTER TABLE measurements "
+                    "ADD COLUMN injected_defects_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
+                ),
+                "experiment_id": (
+                    "ALTER TABLE measurements "
+                    "ADD COLUMN experiment_id TEXT"
+                ),
+                "run_id": (
+                    "ALTER TABLE measurements "
+                    "ADD COLUMN run_id TEXT"
+                ),
+            }
+
+            for column, sql in migrations.items():
+                if column not in existing_columns:
+                    connection.execute(sql)
 
             connection.execute("""
-                CREATE INDEX IF NOT EXISTS idx_measurements_product
+                CREATE INDEX IF NOT EXISTS
+                idx_measurements_product_id
                 ON measurements(product_id)
             """)
+
             connection.execute("""
-                CREATE INDEX IF NOT EXISTS idx_measurements_timestamp
-                ON measurements(timestamp)
+                CREATE INDEX IF NOT EXISTS
+                idx_measurements_status
+                ON measurements(status)
             """)
+
             connection.execute("""
-                CREATE INDEX IF NOT EXISTS idx_measurements_experiment
+                CREATE INDEX IF NOT EXISTS
+                idx_measurements_created_at
+                ON measurements(created_at)
+            """)
+
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS
+                idx_measurements_experiment_id
                 ON measurements(experiment_id)
             """)
 
-    @staticmethod
-    def _prepare_values(item):
-        measurement = item["measurement"]
-        diagnosis = item.get("diagnosis") or {}
-        active_faults = item.get("active_faults") or []
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS
+                idx_measurements_run_id
+                ON measurements(run_id)
+            """)
 
-        return (
-            measurement.get("timestamp"),
-            measurement.get("measurement_id"),
-            measurement.get("product_id"),
-            measurement.get("part_type"),
-            measurement.get("material"),
-            measurement.get("operation"),
-            measurement.get("tool_id"),
-            measurement.get("spindle_speed"),
-            measurement.get("feed_rate"),
-            measurement.get("cutting_depth"),
-            measurement.get("temperature"),
-            measurement.get("vibration"),
-            measurement.get("spindle_load"),
-            measurement.get("tool_wear"),
-            diagnosis.get("status"),
-            json.dumps(diagnosis.get("reasons", []), ensure_ascii=False),
-            json.dumps(
-                diagnosis.get("recommendations", []), ensure_ascii=False
-            ),
-            json.dumps(active_faults, ensure_ascii=False),
-            item.get("experiment_id"),
+            connection.commit()
+
+    # ---------------------------------------------------------
+    # НОРМАЛИЗАЦИЯ ДАННЫХ
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _normalize_status(status):
+        status = str(status or "UNKNOWN").strip().upper()
+
+        if status not in ("GOOD", "DEFECT", "UNKNOWN"):
+            return "UNKNOWN"
+
+        return status
+
+    @staticmethod
+    def _build_filters(
+        product_id=None,
+        experiment_id=None,
+        run_id=None,
+    ):
+        conditions = []
+        values = []
+
+        if product_id is not None:
+            conditions.append("product_id = ?")
+            values.append(product_id)
+
+        if experiment_id is not None:
+            conditions.append("experiment_id = ?")
+            values.append(experiment_id)
+
+        if run_id is not None:
+            conditions.append("run_id = ?")
+            values.append(run_id)
+
+        where = ""
+
+        if conditions:
+            where = " WHERE " + " AND ".join(conditions)
+
+        return where, values
+
+    # ---------------------------------------------------------
+    # СОХРАНЕНИЕ РЕЗУЛЬТАТА
+    # ---------------------------------------------------------
+
+    def log_result(
+        self,
+        result,
+        item_id=None,
+        simulated_defect=False,
+        experiment_id=None,
+        run_id=None,
+    ):
+        """
+        Сохраняет результат контроля.
+
+        experiment_id и run_id позволяют разделять
+        данные по экспериментам и отдельным запускам.
+        """
+
+        if not isinstance(result, dict):
+            raise TypeError(
+                "Результат контроля должен быть словарём."
+            )
+
+        product_id = result.get("product_id")
+
+        if product_id is None:
+            raise ValueError(
+                "В результате контроля отсутствует product_id."
+            )
+
+        if item_id is None:
+            item_id = result.get("item_id")
+
+        if experiment_id is None:
+            experiment_id = result.get("experiment_id")
+
+        if run_id is None:
+            run_id = result.get("run_id")
+
+        measurements = result.get("measurements", {})
+        defects = result.get("defects", [])
+        injected_defects = result.get("injected_defects", [])
+
+        if not isinstance(measurements, dict):
+            raise TypeError(
+                "Измерения должны быть представлены словарём."
+            )
+
+        if not isinstance(defects, list):
+            defects = []
+
+        if not isinstance(injected_defects, list):
+            injected_defects = []
+
+        status = self._normalize_status(
+            result.get("status")
         )
 
-    def log_measurements(self, items):
-        """Пакетная запись нескольких измерений одной транзакцией."""
-        prepared = [self._prepare_values(item) for item in items]
-        if not prepared:
-            return 0
+        created_at = (
+            result.get("processed_at")
+            or result.get("checked_at")
+            or datetime.now().isoformat(timespec="seconds")
+        )
 
-        with self._connection() as connection:
-            connection.executemany(self.INSERT_SQL, prepared)
-        return len(prepared)
+        result_to_save = dict(result)
 
-    def log_measurement(
-        self, measurement, diagnosis=None, active_faults=None,
-        experiment_id=None
-    ):
-        """Совместимый метод записи одного измерения."""
-        return self.log_measurements([{
-            "measurement": measurement,
-            "diagnosis": diagnosis,
-            "active_faults": active_faults,
+        result_to_save.update({
+            "status": status,
+            "measurements": measurements,
+            "defects": defects,
+            "injected_defects": injected_defects,
             "experiment_id": experiment_id,
-        }])
+            "run_id": run_id,
+        })
 
-    def list_measurements(self, product_id=None, limit=None):
-        query = "SELECT * FROM measurements"
-        parameters = []
-        if product_id:
-            query += " WHERE product_id = ?"
-            parameters.append(product_id)
-        query += " ORDER BY id DESC"
+        with self.get_connection() as connection:
 
-        if limit is not None:
-            limit = int(limit)
-            if limit < 1:
-                raise ValueError("Лимит должен быть положительным")
-            query += " LIMIT ?"
-            parameters.append(limit)
-
-        with self._connection() as connection:
-            rows = connection.execute(query, parameters).fetchall()
-        return [dict(row) for row in rows]
-
-    def count_measurements(self, product_id=None):
-        query = "SELECT COUNT(*) FROM measurements"
-        parameters = []
-        if product_id:
-            query += " WHERE product_id = ?"
-            parameters.append(product_id)
-        with self._connection() as connection:
-            return connection.execute(query, parameters).fetchone()[0]
-
-    def export_csv(self, file_path, product_id=None):
-        rows = self.list_measurements(product_id=product_id)
-        if not rows:
-            raise ValueError("Нет измерений для экспорта")
-
-        columns = list(rows[0].keys())
-        destination = Path(file_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        with destination.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.DictWriter(
-                file, fieldnames=columns, delimiter=";"
-            )
-            writer.writeheader()
-            writer.writerows(rows)
-        return destination
-
-    def clear_measurements(self, product_id=None):
-        """Удаляет измерения. Использовать осторожно."""
-        with self._connection() as connection:
-            if product_id:
-                cursor = connection.execute(
-                    "DELETE FROM measurements WHERE product_id = ?",
-                    (product_id,)
+            cursor = connection.execute(
+                """
+                INSERT INTO measurements (
+                    product_id,
+                    item_id,
+                    measurements_json,
+                    status,
+                    defects_json,
+                    result_json,
+                    simulated_defect,
+                    injected_defects_json,
+                    experiment_id,
+                    run_id,
+                    created_at
                 )
-            else:
-                cursor = connection.execute("DELETE FROM measurements")
-            return cursor.rowcount
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product_id,
+                    item_id,
+
+                    json.dumps(
+                        measurements,
+                        ensure_ascii=False,
+                    ),
+
+                    status,
+
+                    json.dumps(
+                        defects,
+                        ensure_ascii=False,
+                    ),
+
+                    json.dumps(
+                        result_to_save,
+                        ensure_ascii=False,
+                    ),
+
+                    int(bool(simulated_defect)),
+
+                    json.dumps(
+                        injected_defects,
+                        ensure_ascii=False,
+                    ),
+
+                    experiment_id,
+                    run_id,
+                    created_at,
+                ),
+            )
+
+            connection.commit()
+
+            return cursor.lastrowid
+
+    # ---------------------------------------------------------
+    # ПОЛУЧЕНИЕ ЗАПИСЕЙ
+    # ---------------------------------------------------------
+
+    def get_result(self, record_id):
+        with self.get_connection() as connection:
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM measurements
+                WHERE id = ?
+                """,
+                (record_id,),
+            ).fetchone()
+
+        return self._convert_row(row) if row else None
+
+    def get_all_records(
+        self,
+        product_id=None,
+        limit=10000,
+        experiment_id=None,
+        run_id=None,
+    ):
+        where, values = self._build_filters(
+            product_id=product_id,
+            experiment_id=experiment_id,
+            run_id=run_id,
+        )
+
+        query = """
+            SELECT *
+            FROM measurements
+        """ + where + """
+            ORDER BY id DESC
+            LIMIT ?
+        """
+
+        values.append(max(1, int(limit)))
+
+        with self.get_connection() as connection:
+
+            rows = connection.execute(
+                query,
+                values,
+            ).fetchall()
+
+        return [
+            self._convert_row(row)
+            for row in rows
+        ]
+
+    def get_experiment_records(self, experiment_id, limit=10000):
+        return self.get_all_records(
+            experiment_id=experiment_id,
+            limit=limit
+        )
+
+    # ---------------------------------------------------------
+    # СТАТИСТИКА КОНТРОЛЯ
+    # ---------------------------------------------------------
+
+    def get_statistics(
+        self,
+        product_id=None,
+        experiment_id=None,
+        run_id=None,
+    ):
+        """
+        Статистика по всем записям либо по выбранному
+        изделию, эксперименту или запуску.
+        """
+
+        where, values = self._build_filters(
+            product_id=product_id,
+            experiment_id=experiment_id,
+            run_id=run_id,
+        )
+
+        query = """
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE WHEN status = 'GOOD'
+                    THEN 1 ELSE 0 END
+                ) AS good,
+
+                SUM(
+                    CASE WHEN status = 'DEFECT'
+                    THEN 1 ELSE 0 END
+                ) AS defect,
+
+                SUM(
+                    CASE WHEN status = 'UNKNOWN'
+                    THEN 1 ELSE 0 END
+                ) AS unknown
+
+            FROM measurements
+        """ + where
+
+        with self.get_connection() as connection:
+            row = connection.execute(
+                query,
+                values,
+            ).fetchone()
+
+        unknown = row["unknown"] or 0
+
+        return {
+            "total": row["total"] or 0,
+            "good": row["good"] or 0,
+            "defect": row["defect"] or 0,
+            "unknown": unknown,
+            "incomplete": unknown,
+        }
+
+    # ---------------------------------------------------------
+    # СТАТИСТИКА ИСКУССТВЕННЫХ ДЕФЕКТОВ
+    # ---------------------------------------------------------
+
+    def get_simulation_statistics(
+        self,
+        product_id=None,
+        experiment_id=None,
+        run_id=None,
+    ):
+        where, values = self._build_filters(
+            product_id=product_id,
+            experiment_id=experiment_id,
+            run_id=run_id,
+        )
+
+        query = """
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE WHEN simulated_defect = 1
+                    THEN 1 ELSE 0 END
+                ) AS generated_defects
+
+            FROM measurements
+        """ + where
+
+        with self.get_connection() as connection:
+            row = connection.execute(
+                query,
+                values,
+            ).fetchone()
+
+        return {
+            "total": row["total"] or 0,
+            "generated_defects": (
+                row["generated_defects"] or 0
+            ),
+        }
+
+    # ---------------------------------------------------------
+    # УДАЛЕНИЕ ЗАПИСЕЙ
+    # ---------------------------------------------------------
+
+    def clear_records(
+        self,
+        product_id=None,
+        experiment_id=None,
+        run_id=None,
+    ):
+        """
+        Удаляет записи с заданными фильтрами.
+
+        Без фильтров очищает всю таблицу.
+        """
+
+        where, values = self._build_filters(
+            product_id=product_id,
+            experiment_id=experiment_id,
+            run_id=run_id,
+        )
+
+        with self.get_connection() as connection:
+
+            connection.execute(
+                "DELETE FROM measurements" + where,
+                values,
+            )
+
+            connection.commit()
+
+    # ---------------------------------------------------------
+    # ПРЕОБРАЗОВАНИЕ ЗАПИСЕЙ
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _convert_row(row):
+        if row is None:
+            return None
+
+        record = dict(row)
+
+        record["measurements"] = json.loads(
+            record.pop("measurements_json")
+        )
+
+        record["defects"] = json.loads(
+            record.pop("defects_json")
+        )
+
+        record["result"] = json.loads(
+            record.pop("result_json")
+        )
+
+        record["injected_defects"] = json.loads(
+            record.pop("injected_defects_json", "[]")
+        )
+
+        return record

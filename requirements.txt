@@ -20,6 +20,10 @@ ezdxf
 openpyxl
 python-docx
 Pillow
+pypdf
+pytesseract
 
 # Сборка EXE (понадобится позднее)
 pyinstaller
+
+ 

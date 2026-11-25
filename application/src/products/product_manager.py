@@ -1,485 +1,731 @@
-
 import sqlite3
-import uuid
 
 from pathlib import Path
-
-
-# Корневая папка проекта
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-DATABASE_DIR = PROJECT_ROOT / "data" / "products"
-DATABASE_PATH = DATABASE_DIR / "catalog.db"
+from datetime import datetime
 
 
 class ProductManager:
+    """
+    Управление номенклатурой изделий.
 
-    def __init__(self, database_path=None):
+    Отвечает за:
+    - подключение к SQLite;
+    - создание структуры базы данных;
+    - CRUD-операции с изделиями;
+    - CRUD-операции с характеристиками;
+    - историю изменений.
+    """
 
-        self.database_path = Path(
-            database_path or DATABASE_PATH
-        )
+    def __init__(self, db_path=None):
 
-        self.database_path.parent.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        # Корневая папка проекта
+        project_root = Path(__file__).resolve().parents[3]
 
+        if db_path is None:
+            db_path = project_root / "data" / "products" / "catalog.db"
+
+        self.db_path = Path(db_path)
+
+        # Создаём папку базы данных, если её нет
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Создаём таблицы
         self.initialize_database()
 
-    # ==========================================
+    # =========================================================
     # ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
-    # ==========================================
+    # =========================================================
 
-    def _connect(self):
+    def get_connection(self):
 
-        connection = sqlite3.connect(
-            self.database_path,
-            timeout=30
-        )
+        connection = sqlite3.connect(self.db_path)
 
         connection.row_factory = sqlite3.Row
 
-        connection.execute(
-            "PRAGMA foreign_keys = ON"
-        )
+        connection.execute("PRAGMA foreign_keys = ON")
 
         return connection
 
-    # ==========================================
-    # СОЗДАНИЕ ТАБЛИЦ
-    # ==========================================
+    # =========================================================
+    # СОЗДАНИЕ БАЗЫ ДАННЫХ
+    # =========================================================
 
     def initialize_database(self):
 
-        with self._connect() as connection:
+        with self.get_connection() as connection:
 
-            connection.execute("""
+            connection.executescript("""
+
                 CREATE TABLE IF NOT EXISTS products (
 
-                    product_id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
 
                     name TEXT NOT NULL,
 
-                    part_type TEXT NOT NULL,
+                    article TEXT NOT NULL UNIQUE,
 
-                    material TEXT NOT NULL,
+                    product_type TEXT,
 
-                    drawing_number TEXT,
+                    material TEXT,
 
-                    description TEXT,
-
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS operations (
-
-                    operation_id TEXT PRIMARY KEY,
-
-                    product_id TEXT NOT NULL,
-
-                    sequence_number INTEGER NOT NULL,
-
-                    operation_name TEXT NOT NULL,
-
-                    spindle_speed REAL,
-
-                    feed_rate REAL,
-
-                    cutting_depth REAL,
-
-                    tool_id TEXT,
+                    density REAL,
 
                     description TEXT,
 
-                    FOREIGN KEY (product_id)
-                        REFERENCES products(product_id)
+                    created_at TEXT NOT NULL,
+
+                    updated_at TEXT NOT NULL
+
+                );
+
+
+                CREATE TABLE IF NOT EXISTS product_parameters (
+
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    product_id INTEGER NOT NULL,
+
+                    name TEXT NOT NULL,
+
+                    code TEXT,
+
+                    nominal REAL,
+
+                    min_value REAL,
+
+                    max_value REAL,
+
+                    unit TEXT,
+
+                    source TEXT DEFAULT 'manual',
+
+                    note TEXT,
+
+                    FOREIGN KEY(product_id)
+                        REFERENCES products(id)
                         ON DELETE CASCADE
-                )
-            """)
 
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
+                );
 
-                    document_id TEXT PRIMARY KEY,
 
-                    product_id TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS product_history (
 
-                    original_name TEXT NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-                    stored_path TEXT NOT NULL,
+                    product_id INTEGER NOT NULL,
 
-                    extension TEXT NOT NULL,
+                    action TEXT NOT NULL,
 
-                    category TEXT,
+                    details TEXT,
 
-                    description TEXT,
+                    created_at TEXT NOT NULL,
 
-                    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
-
-                    FOREIGN KEY (product_id)
-                        REFERENCES products(product_id)
+                    FOREIGN KEY(product_id)
+                        REFERENCES products(id)
                         ON DELETE CASCADE
-                )
+
+                );
+
             """)
 
-    # ==========================================
-    # ПРОВЕРКА СУЩЕСТВОВАНИЯ ИЗДЕЛИЯ
-    # ==========================================
+    # =========================================================
+    # ИЗДЕЛИЯ: СОЗДАНИЕ
+    # =========================================================
 
-    def product_exists(self, product_id):
+    def add_product(self, data):
 
-        with self._connect() as connection:
+        """
+        Добавление нового изделия.
 
-            result = connection.execute(
-                """
-                SELECT 1
-                FROM products
-                WHERE product_id = ?
-                """,
-                (product_id,)
-            ).fetchone()
+        Обязательные поля:
+        - name
+        - article
+        """
 
-        return result is not None
-
-    # ==========================================
-    # ДОБАВЛЕНИЕ ИЗДЕЛИЯ
-    # ==========================================
-
-    def add_product(
-        self,
-        name,
-        part_type,
-        material,
-        drawing_number="",
-        description=""
-    ):
-
-        name = name.strip()
-        part_type = part_type.strip()
-        material = material.strip()
+        name = data.get("name", "").strip()
+        article = data.get("article", "").strip()
 
         if not name:
-            raise ValueError("Не указано название изделия")
+            raise ValueError("Не указано наименование изделия")
 
-        if not part_type:
-            raise ValueError("Не указан тип детали")
+        if not article:
+            raise ValueError("Не указан артикул изделия")
 
-        if not material:
-            raise ValueError("Не указан материал")
+        now = datetime.now().isoformat(timespec="seconds")
 
-        product_id = (
-            f"PRD-{uuid.uuid4().hex[:10].upper()}"
-        )
+        with self.get_connection() as connection:
 
-        with self._connect() as connection:
+            cursor = connection.execute("""
 
-            connection.execute(
-                """
                 INSERT INTO products (
-                    product_id,
+
                     name,
-                    part_type,
+                    article,
+                    product_type,
                     material,
-                    drawing_number,
-                    description
+                    density,
+                    description,
+                    created_at,
+                    updated_at
+
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    product_id,
-                    name,
-                    part_type,
-                    material,
-                    drawing_number,
-                    description
-                )
+
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+
+            """, (
+
+                name,
+                article,
+                data.get("product_type", ""),
+                data.get("material", ""),
+                data.get("density"),
+                data.get("description", ""),
+                now,
+                now
+
+            ))
+
+            product_id = cursor.lastrowid
+
+            self._add_history(
+                connection,
+                product_id,
+                "Создание изделия",
+                f"Создано изделие {name}"
             )
 
-        return product_id
+            return product_id
 
-    # ==========================================
-    # РЕДАКТИРОВАНИЕ ИЗДЕЛИЯ
-    # ==========================================
-
-    def update_product(
-        self,
-        product_id,
-        **fields
-    ):
-
-        allowed_fields = {
-            "name",
-            "part_type",
-            "material",
-            "drawing_number",
-            "description"
-        }
-
-        updates = {
-            key: value
-            for key, value in fields.items()
-            if key in allowed_fields
-        }
-
-        if not updates:
-            raise ValueError(
-                "Нет допустимых полей для изменения"
-            )
-
-        for key in ("name", "part_type", "material"):
-
-            if key in updates and not str(updates[key]).strip():
-                raise ValueError(
-                    f"Поле {key} не может быть пустым"
-                )
-
-        assignments = ", ".join(
-            f"{field} = ?"
-            for field in updates
-        )
-
-        values = list(updates.values())
-
-        values.append(product_id)
-
-        with self._connect() as connection:
-
-            cursor = connection.execute(
-                f"""
-                UPDATE products
-                SET {assignments},
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE product_id = ?
-                """,
-                values
-            )
-
-            if cursor.rowcount == 0:
-                raise ValueError(
-                    "Изделие не найдено"
-                )
-
-    # ==========================================
-    # ПОЛУЧЕНИЕ ОДНОГО ИЗДЕЛИЯ
-    # ==========================================
+    # =========================================================
+    # ИЗДЕЛИЯ: ПОЛУЧЕНИЕ
+    # =========================================================
 
     def get_product(self, product_id):
 
-        with self._connect() as connection:
+        with self.get_connection() as connection:
 
-            row = connection.execute(
-                """
+            product = connection.execute("""
+
                 SELECT *
                 FROM products
-                WHERE product_id = ?
-                """,
-                (product_id,)
-            ).fetchone()
+                WHERE id = ?
 
-        return dict(row) if row else None
+            """, (product_id,)).fetchone()
 
-    # ==========================================
-    # ПОЛУЧЕНИЕ ВСЕХ ИЗДЕЛИЙ
-    # ==========================================
+            return dict(product) if product else None
 
-    def list_products(
+    # =========================================================
+    # ИЗДЕЛИЯ: ПОЛУЧЕНИЕ ВСЕХ ЗАПИСЕЙ
+    # =========================================================
+
+    def get_all_products(self):
+
+        with self.get_connection() as connection:
+
+            products = connection.execute("""
+
+                SELECT
+                    p.*,
+
+                    (
+                        SELECT COUNT(*)
+                        FROM product_parameters pp
+                        WHERE pp.product_id = p.id
+
+                    ) AS parameter_count
+
+                FROM products p
+
+                ORDER BY p.name COLLATE NOCASE
+
+            """).fetchall()
+
+            return [dict(product) for product in products]
+
+    # =========================================================
+    # ИЗДЕЛИЯ: ПОИСК И ФИЛЬТРАЦИЯ
+    # =========================================================
+
+
+    def search_products(
         self,
-        part_type=None,
-        material=None
+        search_text="",
+        product_type="",
+        material=""
     ):
-
-        query = """
-            SELECT *
-            FROM products
-            WHERE 1 = 1
+        """
+        Поиск изделий по наименованию, артикулу,
+        типу изделия и материалу.
+        Возвращает список изделий с количеством характеристик.
         """
 
-        parameters = []
+        connection = self.get_connection()
 
-        if part_type:
+        try:
+            query = """
+                SELECT
+                    p.id,
+                    p.name,
+                    p.article,
+                    p.product_type,
+                    p.material,
+                    p.density,
+                    p.description,
+                    p.created_at,
+                    p.updated_at,
+                    COUNT(pp.id) AS parameter_count
+                FROM products AS p
+                LEFT JOIN product_parameters AS pp
+                    ON pp.product_id = p.id
+                WHERE 1 = 1
+            """
 
-            query += " AND part_type = ?"
+            params = []
 
-            parameters.append(part_type)
+            if search_text:
+                query += """
+                    AND (
+                        p.name LIKE ?
+                        OR p.article LIKE ?
+                    )
+                """
+                search_pattern = f"%{search_text}%"
+                params.extend([
+                    search_pattern,
+                    search_pattern
+                ])
 
-        if material:
+            if product_type:
+                query += " AND p.product_type LIKE ?"
+                params.append(f"%{product_type}%")
 
-            query += " AND material = ?"
+            if material:
+                query += " AND p.material LIKE ?"
+                params.append(f"%{material}%")
 
-            parameters.append(material)
+            query += """
+                GROUP BY
+                    p.id,
+                    p.name,
+                    p.article,
+                    p.product_type,
+                    p.material,
+                    p.density,
+                    p.description,
+                    p.created_at,
+                    p.updated_at
+                ORDER BY p.name COLLATE NOCASE
+            """
 
-        query += " ORDER BY created_at DESC"
+            cursor = connection.execute(query, params)
 
-        with self._connect() as connection:
+            return [dict(row) for row in cursor.fetchall()]
 
-            rows = connection.execute(
-                query,
-                parameters
-            ).fetchall()
+        finally:
+            connection.close()
 
-        return [
-            dict(row)
-            for row in rows
-        ]
 
-    # ==========================================
-    # УДАЛЕНИЕ ИЗДЕЛИЯ
-    # ==========================================
+    # =========================================================
+    # ИЗДЕЛИЯ: РЕДАКТИРОВАНИЕ
+    # =========================================================
+
+    def update_product(self, product_id, data):
+
+        name = data.get("name", "").strip()
+        article = data.get("article", "").strip()
+
+        if not name:
+            raise ValueError("Не указано наименование изделия")
+
+        if not article:
+            raise ValueError("Не указан артикул изделия")
+
+        now = datetime.now().isoformat(timespec="seconds")
+
+        with self.get_connection() as connection:
+
+            cursor = connection.execute("""
+
+                UPDATE products
+
+                SET
+
+                    name = ?,
+                    article = ?,
+                    product_type = ?,
+                    material = ?,
+                    density = ?,
+                    description = ?,
+                    updated_at = ?
+
+                WHERE id = ?
+
+            """, (
+
+                name,
+                article,
+                data.get("product_type", ""),
+                data.get("material", ""),
+                data.get("density"),
+                data.get("description", ""),
+                now,
+                product_id
+
+            ))
+
+            if cursor.rowcount == 0:
+                raise ValueError("Изделие не найдено")
+
+            self._add_history(
+                connection,
+                product_id,
+                "Редактирование изделия",
+                f"Обновлены данные изделия {name}"
+            )
+
+    # =========================================================
+    # ИЗДЕЛИЯ: УДАЛЕНИЕ
+    # =========================================================
 
     def delete_product(self, product_id):
 
-        with self._connect() as connection:
+        with self.get_connection() as connection:
 
-            cursor = connection.execute(
-                """
+            cursor = connection.execute("""
+
                 DELETE FROM products
-                WHERE product_id = ?
-                """,
-                (product_id,)
-            )
+                WHERE id = ?
+
+            """, (product_id,))
 
             if cursor.rowcount == 0:
+                raise ValueError("Изделие не найдено")
 
-                raise ValueError(
-                    "Изделие не найдено"
-                )
+    # =========================================================
+    # ИЗДЕЛИЯ: ПРОВЕРКА АРТИКУЛА
+    # =========================================================
 
-    # ==========================================
-    # ДОБАВЛЕНИЕ ТЕХНОЛОГИЧЕСКОЙ ОПЕРАЦИИ
-    # ==========================================
+    def article_exists(self, article, exclude_id=None):
 
-    def add_operation(
-        self,
-        product_id,
-        operation_name,
-        sequence_number,
-        spindle_speed=None,
-        feed_rate=None,
-        cutting_depth=None,
-        tool_id=None,
-        description=""
-    ):
+        with self.get_connection() as connection:
 
-        if not self.product_exists(product_id):
+            if exclude_id is None:
 
-            raise ValueError(
-                "Изделие не найдено"
-            )
+                result = connection.execute("""
 
-        operation_name = operation_name.strip()
+                    SELECT id
+                    FROM products
+                    WHERE article = ?
 
-        if not operation_name:
+                """, (article,)).fetchone()
 
-            raise ValueError(
-                "Не указано название операции"
-            )
+            else:
 
-        numeric_values = {
-            "spindle_speed": spindle_speed,
-            "feed_rate": feed_rate,
-            "cutting_depth": cutting_depth
+                result = connection.execute("""
+
+                    SELECT id
+                    FROM products
+                    WHERE article = ?
+                    AND id != ?
+
+                """, (article, exclude_id)).fetchone()
+
+            return result is not None
+
+    # =========================================================
+    # ИЗДЕЛИЯ: ДУБЛИРОВАНИЕ
+    # =========================================================
+
+    def duplicate_product(self, product_id):
+
+        product = self.get_product(product_id)
+
+        if product is None:
+            raise ValueError("Изделие не найдено")
+
+        new_article = f'{product["article"]}-COPY'
+
+        counter = 1
+
+        while self.article_exists(new_article):
+
+            counter += 1
+
+            new_article = f'{product["article"]}-COPY{counter}'
+
+        new_data = {
+
+            "name": f'{product["name"]} (копия)',
+            "article": new_article,
+            "product_type": product["product_type"],
+            "material": product["material"],
+            "density": product["density"],
+            "description": product["description"]
+
         }
 
-        for name, value in numeric_values.items():
+        new_product_id = self.add_product(new_data)
 
-            if value is not None:
+        parameters = self.get_product_parameters(product_id)
 
-                numeric_values[name] = float(value)
+        for parameter in parameters:
 
-                if numeric_values[name] <= 0:
+            self.add_parameter(
 
-                    raise ValueError(
-                        f"Некорректное значение: {name}"
-                    )
+                new_product_id,
 
-        if int(sequence_number) < 1:
+                {
 
-            raise ValueError(
-                "Номер операции должен быть положительным"
+                    "name": parameter["name"],
+                    "code": parameter["code"],
+                    "nominal": parameter["nominal"],
+                    "min_value": parameter["min_value"],
+                    "max_value": parameter["max_value"],
+                    "unit": parameter["unit"],
+                    "source": "copy",
+                    "note": parameter["note"]
+
+                }
+
             )
 
-        operation_id = (
-            f"OP-{uuid.uuid4().hex[:10].upper()}"
-        )
+        return new_product_id
 
-        with self._connect() as connection:
+    # =========================================================
+    # ХАРАКТЕРИСТИКИ: ДОБАВЛЕНИЕ
+    # =========================================================
 
-            connection.execute(
-                """
-                INSERT INTO operations (
-                    operation_id,
-                    product_id,
-                    sequence_number,
-                    operation_name,
-                    spindle_speed,
-                    feed_rate,
-                    cutting_depth,
-                    tool_id,
-                    description
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    operation_id,
-                    product_id,
-                    int(sequence_number),
-                    operation_name,
-                    numeric_values["spindle_speed"],
-                    numeric_values["feed_rate"],
-                    numeric_values["cutting_depth"],
-                    tool_id,
-                    description
-                )
-            )
+    def add_parameter(self, product_id, data):
 
-        return operation_id
+        name = data.get("name", "").strip()
 
-    # ==========================================
-    # ПОЛУЧЕНИЕ ОПЕРАЦИЙ ИЗДЕЛИЯ
-    # ==========================================
+        if not name:
+            raise ValueError("Не указано название характеристики")
 
-    def list_operations(self, product_id):
+        minimum = data.get("min_value")
+        maximum = data.get("max_value")
 
-        with self._connect() as connection:
+        if minimum is not None and maximum is not None:
 
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM operations
-                WHERE product_id = ?
-                ORDER BY sequence_number ASC
-                """,
-                (product_id,)
-            ).fetchall()
-
-        return [
-            dict(row)
-            for row in rows
-        ]
-
-    # ==========================================
-    # УДАЛЕНИЕ ОПЕРАЦИИ
-    # ==========================================
-
-    def delete_operation(self, operation_id):
-
-        with self._connect() as connection:
-
-            cursor = connection.execute(
-                """
-                DELETE FROM operations
-                WHERE operation_id = ?
-                """,
-                (operation_id,)
-            )
-
-            if cursor.rowcount == 0:
-
+            if minimum > maximum:
                 raise ValueError(
-                    "Операция не найдена"
+                    "Минимальное значение не может быть больше максимального"
                 )
+
+        with self.get_connection() as connection:
+
+            connection.execute("""
+
+                INSERT INTO product_parameters (
+
+                    product_id,
+                    name,
+                    code,
+                    nominal,
+                    min_value,
+                    max_value,
+                    unit,
+                    source,
+                    note
+
+                )
+
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+            """, (
+
+                product_id,
+                name,
+                data.get("code", ""),
+                data.get("nominal"),
+                minimum,
+                maximum,
+                data.get("unit", ""),
+                data.get("source", "manual"),
+                data.get("note", "")
+
+            ))
+
+            self._add_history(
+                connection,
+                product_id,
+                "Добавление характеристики",
+                name
+            )
+
+    # =========================================================
+    # ХАРАКТЕРИСТИКИ: ПОЛУЧЕНИЕ
+    # =========================================================
+
+    def get_product_parameters(self, product_id):
+
+        with self.get_connection() as connection:
+
+            parameters = connection.execute("""
+
+                SELECT *
+                FROM product_parameters
+
+                WHERE product_id = ?
+
+                ORDER BY id
+
+            """, (product_id,)).fetchall()
+
+            return [dict(parameter) for parameter in parameters]
+
+    # =========================================================
+    # ХАРАКТЕРИСТИКИ: РЕДАКТИРОВАНИЕ
+    # =========================================================
+
+    def update_parameter(self, parameter_id, data):
+
+        name = data.get("name", "").strip()
+
+        if not name:
+            raise ValueError("Не указано название характеристики")
+
+        minimum = data.get("min_value")
+        maximum = data.get("max_value")
+
+        if minimum is not None and maximum is not None:
+
+            if minimum > maximum:
+                raise ValueError(
+                    "Минимальное значение не может быть больше максимального"
+                )
+
+        with self.get_connection() as connection:
+
+            parameter = connection.execute("""
+
+                SELECT product_id
+                FROM product_parameters
+                WHERE id = ?
+
+            """, (parameter_id,)).fetchone()
+
+            if parameter is None:
+                raise ValueError("Характеристика не найдена")
+
+            connection.execute("""
+
+                UPDATE product_parameters
+
+                SET
+
+                    name = ?,
+                    code = ?,
+                    nominal = ?,
+                    min_value = ?,
+                    max_value = ?,
+                    unit = ?,
+                    source = ?,
+                    note = ?
+
+                WHERE id = ?
+
+            """, (
+
+                name,
+                data.get("code", ""),
+                data.get("nominal"),
+                minimum,
+                maximum,
+                data.get("unit", ""),
+                data.get("source", "manual"),
+                data.get("note", ""),
+                parameter_id
+
+            ))
+
+            self._add_history(
+                connection,
+                parameter["product_id"],
+                "Редактирование характеристики",
+                name
+            )
+
+    # =========================================================
+    # ХАРАКТЕРИСТИКИ: УДАЛЕНИЕ
+    # =========================================================
+
+    def delete_parameter(self, parameter_id):
+
+        with self.get_connection() as connection:
+
+            parameter = connection.execute("""
+
+                SELECT product_id, name
+                FROM product_parameters
+                WHERE id = ?
+
+            """, (parameter_id,)).fetchone()
+
+            if parameter is None:
+                raise ValueError("Характеристика не найдена")
+
+            connection.execute("""
+
+                DELETE FROM product_parameters
+                WHERE id = ?
+
+            """, (parameter_id,))
+
+            self._add_history(
+                connection,
+                parameter["product_id"],
+                "Удаление характеристики",
+                parameter["name"]
+            )
+
+    # =========================================================
+    # ИСТОРИЯ ИЗМЕНЕНИЙ
+    # =========================================================
+
+    def _add_history(
+        self,
+        connection,
+        product_id,
+        action,
+        details=""
+    ):
+
+        connection.execute("""
+
+            INSERT INTO product_history (
+
+                product_id,
+                action,
+                details,
+                created_at
+
+            )
+
+            VALUES (?, ?, ?, ?)
+
+        """, (
+
+            product_id,
+            action,
+            details,
+            datetime.now().isoformat(timespec="seconds")
+
+        ))
+
+    def get_product_history(self, product_id):
+
+        with self.get_connection() as connection:
+
+            history = connection.execute("""
+
+                SELECT *
+                FROM product_history
+
+                WHERE product_id = ?
+
+                ORDER BY id DESC
+
+            """, (product_id,)).fetchall()
+
+            return [dict(item) for item in history]
