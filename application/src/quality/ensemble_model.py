@@ -202,9 +202,18 @@ class EnsembleModel:
 
     def _select_features(self, dataframe, training=False):
         """
-        Выбирает только допустимые признаки.
+        Выбирает признаки технологического процесса.
+
+        Используются:
+        - product_id;
+        - process__cutting_speed;
+        - process__feed_rate;
+        - process__depth_of_cut;
+        - process__tool_wear;
+        - process__vibration.
 
         Не используются:
+        - measurement__;
         - experiment_id;
         - run_id;
         - item_id;
@@ -216,10 +225,10 @@ class EnsembleModel:
         self._validate_dataframe(dataframe)
 
         if training:
-            measurement_columns = [
+            process_columns = [
                 column
                 for column in dataframe.columns
-                if column.startswith("measurement__")
+                if column.startswith("process__")
             ]
 
             if "product_id" not in dataframe.columns:
@@ -227,12 +236,12 @@ class EnsembleModel:
                     "В датасете отсутствует product_id."
                 )
 
-            if not measurement_columns:
+            if not process_columns:
                 raise ValueError(
-                    "Не найдены признаки measurement__."
+                    "Не найдены технологические признаки process__."
                 )
 
-            self.numeric_features = measurement_columns
+            self.numeric_features = process_columns
             self.categorical_features = ["product_id"]
 
             self.feature_columns = (
@@ -249,7 +258,9 @@ class EnsembleModel:
 
         for column in self.feature_columns:
             if column not in features.columns:
-                features[column] = np.nan
+                raise ValueError(
+                    f"Отсутствует необходимый признак: {column}"
+                )
 
         features = features[self.feature_columns].copy()
 
@@ -266,6 +277,7 @@ class EnsembleModel:
             )
 
         return features
+
 
     def fit(self, dataframe, target=None):
         """

@@ -2,6 +2,7 @@
 import json
 import math
 import random
+
 from pathlib import Path
 
 import pandas as pd
@@ -11,16 +12,30 @@ from application.src.core.measurement_logger import MeasurementLogger
 
 class DatasetBuilder:
     """
-    Формирование датасета для обучения модели контроля качества.
+    Формирование датасета для предиктивного контроля качества.
+
+    ML-модель прогнозирует качество изделия по технологическим
+    параметрам до получения результатов измерений.
+
+    Используемые признаки:
+    - product_id;
+    - process__cutting_speed;
+    - process__feed_rate;
+    - process__depth_of_cut;
+    - process__tool_wear;
+    - process__vibration.
+
+    Измеренные характеристики не используются как признаки,
+    поскольку по ним непосредственно определяется целевая метка.
 
     Особенности:
     - поддержка нескольких типов изделий;
-    - автоматическое определение измеряемых характеристик;
     - исключение UNKNOWN;
+    - исключение старых записей без технологических параметров;
+    - исключение записей с искусственно внесенными дефектами;
     - групповое разделение по experiment_id;
     - стратификация экспериментов по изделиям;
-    - балансировка классов GOOD/DEFECT;
-    - исключение искусственных меток из признаков.
+    - сохранение статистики и состава признаков.
     """
 
     def __init__(
@@ -28,8 +43,9 @@ class DatasetBuilder:
         measurement_logger=None,
         output_dir=None,
         test_size=0.2,
+        validation_size=0.15,
         random_state=42,
-        split_candidates=500
+        split_candidates=1000,
     ):
         self.measurement_logger = (
             measurement_logger
@@ -46,12 +62,23 @@ class DatasetBuilder:
         )
 
         self.test_size = float(test_size)
+        self.validation_size = float(validation_size)
         self.random_state = int(random_state)
         self.split_candidates = int(split_candidates)
 
         if not 0 < self.test_size < 1:
             raise ValueError(
                 "test_size должен находиться между 0 и 1."
+            )
+
+        if not 0 < self.validation_size < 1:
+            raise ValueError(
+                "validation_size должен находиться между 0 и 1."
+            )
+
+        if self.test_size + self.validation_size >= 1:
+            raise ValueError(
+                "Сумма validation_size и test_size должна быть меньше 1."
             )
 
         if self.split_candidates < 1:
@@ -61,13 +88,24 @@ class DatasetBuilder:
 
         self.dataset = None
         self.train_dataset = None
+        self.validation_dataset = None
         self.test_dataset = None
+
+    # ---------------------------------------------------------
+    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ
+    # ---------------------------------------------------------
 
     @staticmethod
     def _parse_json(value):
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
+
+                if isinstance(parsed, dict):
+                    return parsed
+
+                return {}
+
             except (json.JSONDecodeError, TypeError):
                 return {}
 
@@ -77,21 +115,47 @@ class DatasetBuilder:
         return {}
 
     @staticmethod
-    def _get_numeric_measurements(measurements):
+    def _to_float(value):
+        if value is None or isinstance(value, bool):
+            return None
+
+        try:
+            number = float(
+                str(value).strip().replace(",", ".")
+            )
+
+            if math.isfinite(number):
+                return number
+
+        except (ValueError, TypeError):
+            pass
+
+        return None
+
+    @staticmethod
+    def _get_numeric_process_parameters(process_parameters):
+        """
+        Преобразует технологические параметры в ML-признаки.
+
+        Например:
+        cutting_speed -> process__cutting_speed
+        feed_rate     -> process__feed_rate
+        """
+
         result = {}
 
-        if not isinstance(measurements, dict):
+        if not isinstance(process_parameters, dict):
             return result
 
-        for name, value in measurements.items():
-            try:
-                number = float(value)
+        for name, value in process_parameters.items():
+            number = DatasetBuilder._to_float(value)
 
-                if math.isfinite(number):
-                    result[f"measurement__{name}"] = number
-
-            except (TypeError, ValueError):
+            if number is None:
                 continue
+
+            feature_name = f"process__{name}"
+
+            result[feature_name] = number
 
         return result
 
@@ -102,10 +166,33 @@ class DatasetBuilder:
 
         return records or []
 
+    # ---------------------------------------------------------
+    # ФОРМИРОВАНИЕ ДАТАСЕТА
+    # ---------------------------------------------------------
+
     def prepare_dataset(self, records):
+        """
+        Формирует датасет только из записей,
+        содержащих технологические параметры.
+
+        Не использует измеренные характеристики как признаки.
+        """
+
         rows = []
 
+        counters = {
+            "total": 0,
+            "unknown": 0,
+            "without_experiment_id": 0,
+            "without_product_id": 0,
+            "without_process_parameters": 0,
+            "simulated_defects": 0,
+            "accepted": 0,
+        }
+
         for record in records:
+            counters["total"] += 1
+
             if not isinstance(record, dict):
                 continue
 
@@ -113,15 +200,9 @@ class DatasetBuilder:
                 record.get("result")
             )
 
-            measurements = record.get("measurements")
-
-            if not isinstance(measurements, dict):
-                measurements = nested_result.get(
-                    "measurements",
-                    {}
-                )
-
-            measurements = self._parse_json(measurements)
+            # -------------------------------------------------
+            # 1. Получение статуса контроля
+            # -------------------------------------------------
 
             status = (
                 record.get("status")
@@ -129,10 +210,34 @@ class DatasetBuilder:
                 or "UNKNOWN"
             )
 
-            status = str(status).upper()
+            status = str(status).strip().upper()
 
             if status not in ("GOOD", "DEFECT"):
+                counters["unknown"] += 1
                 continue
+
+            # -------------------------------------------------
+            # 2. Исключение искусственно внесенных дефектов
+            # -------------------------------------------------
+
+            simulated_defect = record.get(
+                "simulated_defect",
+                nested_result.get("simulated_defect", False),
+            )
+
+            if isinstance(simulated_defect, str):
+                simulated_defect = (
+                    simulated_defect.strip().lower()
+                    in ("1", "true", "yes")
+                )
+
+            if bool(simulated_defect):
+                counters["simulated_defects"] += 1
+                continue
+
+            # -------------------------------------------------
+            # 3. Идентификатор эксперимента
+            # -------------------------------------------------
 
             experiment_id = (
                 record.get("experiment_id")
@@ -140,7 +245,12 @@ class DatasetBuilder:
             )
 
             if not experiment_id:
+                counters["without_experiment_id"] += 1
                 continue
+
+            # -------------------------------------------------
+            # 4. Идентификатор изделия
+            # -------------------------------------------------
 
             product_id = (
                 record.get("product_id")
@@ -148,7 +258,35 @@ class DatasetBuilder:
             )
 
             if product_id is None:
+                counters["without_product_id"] += 1
                 continue
+
+            # -------------------------------------------------
+            # 5. Технологические параметры
+            # -------------------------------------------------
+
+            process_parameters = nested_result.get(
+                "process_parameters",
+                record.get("process_parameters", {}),
+            )
+
+            process_parameters = self._parse_json(
+                process_parameters
+            )
+
+            process_features = (
+                self._get_numeric_process_parameters(
+                    process_parameters
+                )
+            )
+
+            if not process_features:
+                counters["without_process_parameters"] += 1
+                continue
+
+            # -------------------------------------------------
+            # 6. Формирование строки датасета
+            # -------------------------------------------------
 
             product_name = (
                 nested_result.get("product_name")
@@ -158,620 +296,400 @@ class DatasetBuilder:
 
             row = {
                 "experiment_id": str(experiment_id),
+
                 "run_id": (
                     record.get("run_id")
                     or nested_result.get("run_id")
                     or ""
                 ),
+
                 "item_id": (
                     record.get("item_id")
                     or nested_result.get("item_id")
                     or ""
                 ),
+
                 "product_id": str(product_id),
+
                 "product_name": str(product_name),
             }
 
-            row.update(
-                self._get_numeric_measurements(measurements)
-            )
+            # Добавляем только технологические параметры.
+            row.update(process_features)
 
+            # GOOD = 0, DEFECT = 1.
             row["target"] = (
                 0 if status == "GOOD" else 1
             )
 
             rows.append(row)
+            counters["accepted"] += 1
+
+        print("\n======= ФИЛЬТРАЦИЯ ЗАПИСЕЙ =======")
+
+        print(
+            f"Всего записей: {counters['total']}"
+        )
+
+        print(
+            f"Принято записей: {counters['accepted']}"
+        )
+
+        print(
+            f"UNKNOWN: {counters['unknown']}"
+        )
+
+        print(
+            f"Без experiment_id: "
+            f"{counters['without_experiment_id']}"
+        )
+
+        print(
+            f"Без product_id: "
+            f"{counters['without_product_id']}"
+        )
+
+        print(
+            f"Без технологических параметров: "
+            f"{counters['without_process_parameters']}"
+        )
+
+        print(
+            f"С искусственными дефектами: "
+            f"{counters['simulated_defects']}"
+        )
 
         if not rows:
             raise ValueError(
                 "Не удалось сформировать датасет. "
-                "Проверьте наличие записей GOOD/DEFECT, "
-                "измерений и experiment_id."
+                "Не найдены записи GOOD/DEFECT с технологическими "
+                "параметрами и без искусственно внесенных дефектов. "
+                "Создайте новые эксперименты после обновления "
+                "ProductGenerator и ConveyorSimulator."
             )
 
         dataframe = pd.DataFrame(rows)
 
-        measurement_columns = [
+        process_columns = [
             column
             for column in dataframe.columns
-            if column.startswith("measurement__")
+            if column.startswith("process__")
         ]
 
-        if not measurement_columns:
+        if not process_columns:
             raise ValueError(
-                "В записях не обнаружены числовые измерения."
+                "В датасете отсутствуют технологические признаки."
             )
 
+        # Удаляем записи, у которых все процессные признаки пустые.
         dataframe = dataframe.dropna(
-            subset=measurement_columns,
-            how="all"
+            subset=process_columns,
+            how="all",
         ).copy()
 
         if dataframe.empty:
             raise ValueError(
-                "После удаления пустых измерений датасет пуст."
+                "После проверки технологических параметров "
+                "датасет оказался пустым."
             )
+
+        # Проверяем наличие хотя бы двух классов.
+        if dataframe["target"].nunique() < 2:
+            raise ValueError(
+                "В датасете присутствует только один класс. "
+                "Для обучения классификатора необходимы "
+                "как GOOD, так и DEFECT."
+            )
+
+        print("\n======= СОСТАВ ПРИЗНАКОВ =======")
+
+        for column in process_columns:
+            print(column)
+
+        print(
+            f"\nВсего технологических признаков: "
+            f"{len(process_columns)}"
+        )
 
         return dataframe
 
+    # ---------------------------------------------------------
+    # СТАТИСТИКА И РАЗДЕЛЕНИЕ ПО ГРУППАМ
+    # ---------------------------------------------------------
+
     @staticmethod
     def _get_product_statistics(dataframe):
-        """
-        Статистика по количеству экспериментов и классов
-        для каждого изделия.
-        """
         result = {}
-
         for product_id, group in dataframe.groupby("product_id"):
             result[str(product_id)] = {
-                "experiments": int(
-                    group["experiment_id"].nunique()
-                ),
+                "experiments": int(group["experiment_id"].nunique()),
                 "records": int(len(group)),
-                "good": int(
-                    (group["target"] == 0).sum()
-                ),
-                "defect": int(
-                    (group["target"] == 1).sum()
-                )
+                "good": int((group["target"] == 0).sum()),
+                "defect": int((group["target"] == 1).sum()),
             }
-
         return result
 
-    @staticmethod
-    def _get_test_experiment_count(total_experiments, test_size):
-        """
-        Определяет количество экспериментов изделия,
-        направляемых в тестовую выборку.
-
-        Для изделий с достаточным количеством групп
-        старается выделить минимум три тестовых эксперимента.
-        При этом минимум один эксперимент остаётся в train.
-        """
-        if total_experiments < 2:
-            return 0
-
-        desired_count = round(
-            total_experiments * test_size
-        )
-
-        minimum_count = min(
-            3,
-            total_experiments - 1
-        )
-
-        test_count = max(
-            desired_count,
-            minimum_count
-        )
-
-        return min(
-            test_count,
-            total_experiments - 1
-        )
-
-    def _evaluate_split(self, dataframe, train, test):
-        """
-        Оценивает качество конкретного разделения.
-
-        Меньшее значение означает более удачное разделение.
-        """
-        score = 0.0
-
-        if train.empty or test.empty:
+    def _evaluate_three_way_split(self, dataframe, train, validation, test):
+        """Оценивает близость размеров и распределений классов к исходным."""
+        if train.empty or validation.empty or test.empty:
             return float("inf")
 
-        total_records = len(dataframe)
+        score = 0.0
+        total = len(dataframe)
+        desired = {
+            "train": 1.0 - self.validation_size - self.test_size,
+            "validation": self.validation_size,
+            "test": self.test_size,
+        }
+        subsets = {"train": train, "validation": validation, "test": test}
 
-        actual_test_ratio = (
-            len(test) / total_records
-        )
-
-        score += abs(
-            actual_test_ratio - self.test_size
-        ) * 5
-
-        all_products = sorted(
-            dataframe["product_id"].unique()
-        )
-
-        for product_id in all_products:
-            original = dataframe[
-                dataframe["product_id"] == product_id
-            ]
-
-            train_product = train[
-                train["product_id"] == product_id
-            ]
-
-            test_product = test[
-                test["product_id"] == product_id
-            ]
-
-            if train_product.empty:
-                score += 100
-
-            if (
-                original["experiment_id"].nunique() >= 2
-                and test_product.empty
-            ):
-                score += 100
-
-            # Сравнение распределения классов по изделию.
-            original_distribution = (
-                original["target"].value_counts(normalize=True)
-            )
-
-            for subset in (train_product, test_product):
-                if subset.empty:
-                    continue
-
-                subset_distribution = (
-                    subset["target"].value_counts(normalize=True)
+        for name, subset in subsets.items():
+            ratio = len(subset) / total
+            score += abs(ratio - desired[name]) * 5
+            distribution = subset["target"].value_counts(normalize=True)
+            original = dataframe["target"].value_counts(normalize=True)
+            for class_value in (0, 1):
+                score += abs(
+                    float(distribution.get(class_value, 0))
+                    - float(original.get(class_value, 0))
                 )
+                if name == "train" and float(distribution.get(class_value, 0)) == 0:
+                    score += 100
+                elif name in ("validation", "test") and float(distribution.get(class_value, 0)) == 0:
+                    score += 2
 
-                for class_value in (0, 1):
-                    original_ratio = float(
-                        original_distribution.get(
-                            class_value,
-                            0
-                        )
-                    )
-
-                    subset_ratio = float(
-                        subset_distribution.get(
-                            class_value,
-                            0
-                        )
-                    )
-
-                    score += abs(
-                        original_ratio - subset_ratio
-                    )
-
-                    # Штраф за отсутствие класса,
-                    # если он присутствует в исходном изделии.
-                    if (
-                        original_ratio > 0
-                        and subset_ratio == 0
-                    ):
-                        score += 2
-
+        # Штрафуем отсутствие изделия в обучении. В validation/test оно
+        # может отсутствовать, если для изделия накоплено менее трёх групп.
+        for product_id, original_group in dataframe.groupby("product_id"):
+            train_group = train[train["product_id"] == product_id]
+            if train_group.empty:
+                score += 100
+            group_count = original_group["experiment_id"].nunique()
+            if group_count >= 3:
+                for subset in (validation, test):
+                    if subset[subset["product_id"] == product_id].empty:
+                        score += 10
         return score
 
     def split_dataset(self, dataframe):
-        """
-        Стратифицированное групповое разделение.
-
-        Эксперименты распределяются отдельно для каждого изделия.
-        Один experiment_id целиком относится либо к train,
-        либо к test.
-        """
+        """Групповое разделение Train/Validation/Test по experiment_id."""
         if dataframe.empty:
+            raise ValueError("Нельзя разделить пустой датасет.")
+
+        products_per_experiment = dataframe.groupby("experiment_id")["product_id"].nunique()
+        mixed = products_per_experiment[products_per_experiment > 1]
+        if not mixed.empty:
             raise ValueError(
-                "Нельзя разделить пустой датасет."
+                "Обнаружены experiment_id, содержащие записи нескольких изделий: "
+                + ", ".join(mixed.index.astype(str).tolist()[:10])
             )
 
-        # Проверяем, что один эксперимент не содержит
-        # записи разных изделий.
-        products_per_experiment = (
-            dataframe.groupby("experiment_id")["product_id"]
-            .nunique()
-        )
-
-        mixed_experiments = (
-            products_per_experiment[
-                products_per_experiment > 1
-            ]
-        )
-
-        if not mixed_experiments.empty:
-            raise ValueError(
-                "Обнаружены experiment_id, содержащие записи "
-                "нескольких изделий. Нельзя независимо "
-                "стратифицировать такие эксперименты по изделиям. "
-                "Проблемные ID: "
-                + ", ".join(
-                    mixed_experiments.index.astype(str).tolist()[:10]
-                )
-            )
-
-        product_statistics = self._get_product_statistics(
-            dataframe
-        )
-
-        print("\n======= ЭКСПЕРИМЕНТЫ ПО ИЗДЕЛИЯМ =======")
-
-        for product_id, stats in product_statistics.items():
+        statistics = self._get_product_statistics(dataframe)
+        print("\n======= НЕЗАВИСИМЫЕ ЭКСПЕРИМЕНТЫ ПО ИЗДЕЛИЯМ =======")
+        for product_id, stats in statistics.items():
             print(
-                f"Изделие {product_id}: "
-                f"экспериментов {stats['experiments']}, "
-                f"записей {stats['records']}, "
-                f"GOOD {stats['good']}, "
+                f"Изделие {product_id}: экспериментов {stats['experiments']}, "
+                f"записей {stats['records']}, GOOD {stats['good']}, "
                 f"DEFECT {stats['defect']}"
             )
+            if stats["experiments"] < 3:
+                print(
+                    f"  ВНИМАНИЕ: для изделия {product_id} недостаточно "
+                    "независимых экспериментов, чтобы представить его "
+                    "во всех трёх выборках."
+                )
 
+        product_groups = {
+            str(product_id): group["experiment_id"].drop_duplicates().tolist()
+            for product_id, group in dataframe.groupby("product_id")
+        }
         rng = random.Random(self.random_state)
-
-        product_groups = {}
-
-        for product_id, group in dataframe.groupby("product_id"):
-            experiments = (
-                group["experiment_id"]
-                .drop_duplicates()
-                .tolist()
-            )
-
-            product_groups[str(product_id)] = experiments
-
-        best_split = None
+        best = None
         best_score = float("inf")
 
-        # Многократно пробуем разные комбинации групп.
         for _ in range(self.split_candidates):
-            selected_test_experiments = set()
-
-            for product_id, experiments in product_groups.items():
-                total_experiments = len(experiments)
-
-                test_count = self._get_test_experiment_count(
-                    total_experiments,
-                    self.test_size
-                )
-
-                if test_count == 0:
-                    continue
-
-                shuffled = experiments.copy()
+            assignment = {"train": set(), "validation": set(), "test": set()}
+            for experiments in product_groups.values():
+                shuffled = list(experiments)
                 rng.shuffle(shuffled)
+                count = len(shuffled)
 
-                selected = shuffled[:test_count]
+                if count >= 3:
+                    validation_count = max(1, round(count * self.validation_size))
+                    test_count = max(1, round(count * self.test_size))
+                    while validation_count + test_count >= count:
+                        if validation_count >= test_count and validation_count > 1:
+                            validation_count -= 1
+                        elif test_count > 1:
+                            test_count -= 1
+                        else:
+                            break
+                    assignment["validation"].update(shuffled[:validation_count])
+                    assignment["test"].update(
+                        shuffled[validation_count:validation_count + test_count]
+                    )
+                    assignment["train"].update(
+                        shuffled[validation_count + test_count:]
+                    )
+                elif count == 2:
+                    # Один эксперимент оставляем для обучения, второй случайно
+                    # направляем либо в validation, либо в test.
+                    assignment["train"].add(shuffled[0])
+                    destination = "validation" if rng.random() < 0.5 else "test"
+                    assignment[destination].add(shuffled[1])
+                else:
+                    assignment["train"].update(shuffled)
 
-                selected_test_experiments.update(
-                    selected
-                )
+            masks = {
+                name: dataframe["experiment_id"].isin(ids)
+                for name, ids in assignment.items()
+            }
+            train = dataframe[masks["train"]].copy()
+            validation = dataframe[masks["validation"]].copy()
+            test = dataframe[masks["test"]].copy()
 
-            if not selected_test_experiments:
+            if train.empty or validation.empty or test.empty:
+                continue
+            if train["target"].nunique() < 2:
                 continue
 
-            test_mask = dataframe["experiment_id"].isin(
-                selected_test_experiments
-            )
-
-            test = dataframe[test_mask].copy()
-            train = dataframe[~test_mask].copy()
-
-            train_experiments = set(
-                train["experiment_id"]
-            )
-
-            test_experiments = set(
-                test["experiment_id"]
-            )
-
-            if train_experiments & test_experiments:
+            sets = [set(assignment[name]) for name in ("train", "validation", "test")]
+            if (sets[0] & sets[1]) or (sets[0] & sets[2]) or (sets[1] & sets[2]):
                 continue
 
-            score = self._evaluate_split(
-                dataframe,
-                train,
-                test
+            score = self._evaluate_three_way_split(
+                dataframe, train, validation, test
             )
-
             if score < best_score:
                 best_score = score
-                best_split = (
-                    train.copy(),
-                    test.copy()
-                )
+                best = (train, validation, test)
 
-        if best_split is None:
+        if best is None:
             raise ValueError(
-                "Не удалось сформировать разделение датасета. "
-                "Проверьте количество независимых экспериментов."
+                "Не удалось сформировать три непустые выборки с обоими "
+                "классами в Train. Увеличьте число независимых экспериментов."
             )
 
-        train, test = best_split
-
-        train_experiments = set(
-            train["experiment_id"]
-        )
-
-        test_experiments = set(
-            test["experiment_id"]
-        )
-
-        if train_experiments & test_experiments:
-            raise RuntimeError(
-                "Обнаружена утечка экспериментов между train и test."
-            )
+        train, validation, test = best
+        group_sets = [
+            set(train["experiment_id"].astype(str)),
+            set(validation["experiment_id"].astype(str)),
+            set(test["experiment_id"].astype(str)),
+        ]
+        if (group_sets[0] & group_sets[1]) or (group_sets[0] & group_sets[2]) or (group_sets[1] & group_sets[2]):
+            raise RuntimeError("Обнаружена утечка experiment_id между выборками.")
 
         print("\n======= РЕЗУЛЬТАТ РАЗДЕЛЕНИЯ =======")
-
-        print(
-            f"Train: {len(train)} записей, "
-            f"{train['experiment_id'].nunique()} экспериментов"
-        )
-
-        print(
-            f"Test: {len(test)} записей, "
-            f"{test['experiment_id'].nunique()} экспериментов"
-        )
-
-        print(
-            f"Оценка разделения: {best_score:.4f}"
-        )
-
-        print("\n======= РАСПРЕДЕЛЕНИЕ TRAIN =======")
-
-        print(
-            pd.crosstab(
-                train["product_id"],
-                train["target"]
-            ).rename(
-                columns={
-                    0: "GOOD",
-                    1: "DEFECT"
-                }
-            )
-        )
-
-        print("\n======= РАСПРЕДЕЛЕНИЕ TEST =======")
-
-        print(
-            pd.crosstab(
-                test["product_id"],
-                test["target"]
-            ).rename(
-                columns={
-                    0: "GOOD",
-                    1: "DEFECT"
-                }
-            )
-        )
-
-        print("\n======= ЭКСПЕРИМЕНТЫ ПО ИЗДЕЛИЯМ =======")
-
-        for product_id, experiments in product_groups.items():
-            train_count = train[
-                train["product_id"] == product_id
-            ]["experiment_id"].nunique()
-
-            test_count = test[
-                test["product_id"] == product_id
-            ]["experiment_id"].nunique()
-
+        for name, subset in (("Train", train), ("Validation", validation), ("Test", test)):
             print(
-                f"Изделие {product_id}: "
-                f"train — {train_count}, "
-                f"test — {test_count}, "
-                f"всего — {len(experiments)}"
+                f"{name}: {len(subset)} записей, "
+                f"{subset['experiment_id'].nunique()} экспериментов, "
+                f"GOOD {(subset['target'] == 0).sum()}, "
+                f"DEFECT {(subset['target'] == 1).sum()}"
             )
+            print(pd.crosstab(subset["product_id"], subset["target"]).rename(
+                columns={0: "GOOD", 1: "DEFECT"}
+            ))
 
-            if len(experiments) == 1:
-                print(
-                    "  ВНИМАНИЕ: только один эксперимент. "
-                    "Изделие невозможно представить "
-                    "одновременно в train и test."
-                )
+        print(f"Оценка разделения: {best_score:.4f}")
+        return train, validation, test
 
-        return train, test
+    # ---------------------------------------------------------
+    # СОХРАНЕНИЕ ДАТАСЕТА
+    # ---------------------------------------------------------
 
-    def save_dataset(self, dataframe, train, test):
-        self.output_dir.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+    def save_dataset(self, dataframe, train, validation, test):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        paths = {
+            "dataset": self.output_dir / "dataset.csv",
+            "train": self.output_dir / "train.csv",
+            "validation": self.output_dir / "validation.csv",
+            "test": self.output_dir / "test.csv",
+            "info": self.output_dir / "split_info.json",
+        }
+        for key, subset in (("dataset", dataframe), ("train", train),
+                            ("validation", validation), ("test", test)):
+            subset.to_csv(paths[key], index=False, encoding="utf-8-sig")
 
-        dataset_path = self.output_dir / "dataset.csv"
-        train_path = self.output_dir / "train.csv"
-        test_path = self.output_dir / "test.csv"
-        info_path = self.output_dir / "split_info.json"
-
-        dataframe.to_csv(
-            dataset_path,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-        train.to_csv(
-            train_path,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-        test.to_csv(
-            test_path,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-        measurement_columns = [
-            column
-            for column in dataframe.columns
-            if column.startswith("measurement__")
-        ]
-
-        train_experiments = sorted(
-            train["experiment_id"].unique().tolist()
-        )
-
-        test_experiments = sorted(
-            test["experiment_id"].unique().tolist()
-        )
-
+        process_columns = [c for c in dataframe.columns if c.startswith("process__")]
         info = {
+            "dataset_type": "predictive_process_parameters",
+            "prediction_description": (
+                "Прогнозирование качества изделия по технологическим параметрам до измерения"
+            ),
             "total_records": len(dataframe),
             "train_records": len(train),
+            "validation_records": len(validation),
             "test_records": len(test),
-
-            "train_experiments": train_experiments,
-            "test_experiments": test_experiments,
-
-            "product_statistics": (
-                self._get_product_statistics(dataframe)
-            ),
-
-            "train_products": sorted(
-                train["product_id"].unique().tolist()
-            ),
-
-            "test_products": sorted(
-                test["product_id"].unique().tolist()
-            ),
-
-            "measurement_features": measurement_columns,
-
-            "feature_columns": (
-                ["product_id"] + measurement_columns
-            ),
-
+            "train_experiments": sorted(train["experiment_id"].astype(str).unique().tolist()),
+            "validation_experiments": sorted(validation["experiment_id"].astype(str).unique().tolist()),
+            "test_experiments": sorted(test["experiment_id"].astype(str).unique().tolist()),
+            "product_statistics": self._get_product_statistics(dataframe),
+            "process_features": process_columns,
+            "feature_columns": ["product_id"] + process_columns,
+            "excluded_features": [
+                "measurement__*", "simulated_defect", "simulated_defective_parameters",
+                "injected_defects", "experiment_id", "run_id", "item_id"
+            ],
             "target_column": "target",
-
-            "target_classes": {
-                "GOOD": 0,
-                "DEFECT": 1
-            },
-
+            "target_classes": {"GOOD": 0, "DEFECT": 1},
             "class_distribution": {
-                str(key): int(value)
-                for key, value in dataframe["target"]
-                .value_counts()
-                .sort_index()
-                .items()
+                str(k): int(v) for k, v in dataframe["target"].value_counts().sort_index().items()
             },
-
+            "validation_size": self.validation_size,
             "test_size": self.test_size,
             "random_state": self.random_state,
             "split_candidates": self.split_candidates,
-
-            "split_method": (
-                "Stratified group split by product_id "
-                "and experiment_id with class balancing"
-            )
+            "split_method": "Group split by experiment_id with approximate class balancing",
         }
+        with open(paths["info"], "w", encoding="utf-8") as file:
+            json.dump(info, file, ensure_ascii=False, indent=4)
+        return {key: str(value) for key, value in paths.items()}
 
-        with open(
-            info_path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-            json.dump(
-                info,
-                file,
-                ensure_ascii=False,
-                indent=4
-            )
-
-        return {
-            "dataset": str(dataset_path),
-            "train": str(train_path),
-            "test": str(test_path),
-            "info": str(info_path)
-        }
+    # ---------------------------------------------------------
+    # ПОЛНЫЙ ЦИКЛ
+    # ---------------------------------------------------------
 
     def build_dataset(self, records=None):
-        """
-        Полный цикл формирования датасета.
-        """
+        """Полный цикл формирования датасета и трёх выборок."""
         if records is None:
             records = self.load_records()
-
         if not records:
-            raise ValueError(
-                "В базе данных пока нет записей контроля."
-            )
+            raise ValueError("В базе данных пока нет записей контроля.")
 
         dataframe = self.prepare_dataset(records)
-
-        train, test = self.split_dataset(dataframe)
-
-        paths = self.save_dataset(
-            dataframe,
-            train,
-            test
-        )
+        train, validation, test = self.split_dataset(dataframe)
+        paths = self.save_dataset(dataframe, train, validation, test)
 
         self.dataset = dataframe
         self.train_dataset = train
+        self.validation_dataset = validation
         self.test_dataset = test
-
-        measurement_columns = [
-            column
-            for column in dataframe.columns
-            if column.startswith("measurement__")
-        ]
+        process_columns = [c for c in dataframe.columns if c.startswith("process__")]
 
         return {
             "total": len(dataframe),
             "train": len(train),
+            "validation": len(validation),
             "test": len(test),
-
-            "experiments": (
-                dataframe["experiment_id"].nunique()
-            ),
-
-            "train_experiments": (
-                train["experiment_id"].nunique()
-            ),
-
-            "test_experiments": (
-                test["experiment_id"].nunique()
-            ),
-
-            "products": (
-                dataframe["product_id"].nunique()
-            ),
-
-            "features": len(measurement_columns) + 1,
-
-            "good": int(
-                (dataframe["target"] == 0).sum()
-            ),
-
-            "defect": int(
-                (dataframe["target"] == 1).sum()
-            ),
-
-            "train_good": int(
-                (train["target"] == 0).sum()
-            ),
-
-            "train_defect": int(
-                (train["target"] == 1).sum()
-            ),
-
-            "test_good": int(
-                (test["target"] == 0).sum()
-            ),
-
-            "test_defect": int(
-                (test["target"] == 1).sum()
-            ),
-
+            "experiments": dataframe["experiment_id"].nunique(),
+            "train_experiments": train["experiment_id"].nunique(),
+            "validation_experiments": validation["experiment_id"].nunique(),
+            "test_experiments": test["experiment_id"].nunique(),
+            "products": dataframe["product_id"].nunique(),
+            "features": len(process_columns) + 1,
+            "process_features": process_columns,
+            "good": int((dataframe["target"] == 0).sum()),
+            "defect": int((dataframe["target"] == 1).sum()),
+            "train_good": int((train["target"] == 0).sum()),
+            "train_defect": int((train["target"] == 1).sum()),
+            "validation_good": int((validation["target"] == 0).sum()),
+            "validation_defect": int((validation["target"] == 1).sum()),
+            "test_good": int((test["target"] == 0).sum()),
+            "test_defect": int((test["target"] == 1).sum()),
             "paths": paths,
-
             "dataframe": dataframe,
             "train_dataframe": train,
-            "test_dataframe": test
+            "validation_dataframe": validation,
+            "test_dataframe": test,
         }

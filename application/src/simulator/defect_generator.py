@@ -1,3 +1,4 @@
+
 import random
 
 
@@ -5,8 +6,8 @@ class DefectGenerator:
     """
     Универсальный генератор дефектов изделий.
 
-    Использует минимальные и максимальные значения
-    характеристик из номенклатуры.
+    Вероятность определяет, будет ли изделие дефектным.
+    Количество дефектных характеристик выбирается случайно.
     """
 
     def __init__(
@@ -15,6 +16,7 @@ class DefectGenerator:
         random_seed=None,
         min_deviation=0.1,
         max_deviation=0.8,
+        max_defects_per_product=3,
     ):
         self.rng = random.Random(random_seed)
 
@@ -27,6 +29,11 @@ class DefectGenerator:
         self.max_deviation = max(
             self.min_deviation,
             float(max_deviation),
+        )
+
+        self.max_defects_per_product = max(
+            1,
+            int(max_defects_per_product),
         )
 
     @staticmethod
@@ -68,10 +75,8 @@ class DefectGenerator:
 
         if minimum is not None and maximum is not None:
             side = self.rng.choice(["below", "above"])
-
         elif minimum is not None:
             side = "below"
-
         else:
             side = "above"
 
@@ -81,18 +86,6 @@ class DefectGenerator:
         return round(maximum + deviation, 6)
 
     def generate_defect(self, measurements, parameters):
-        """
-        С вероятностью defect_probability вносит
-        дефект в одну из характеристик.
-
-        Возвращает:
-        {
-            "measurements": изменённые измерения,
-            "has_defect": bool,
-            "defective_parameters": [...]
-        }
-        """
-
         result = dict(measurements)
 
         if self.rng.random() >= self.defect_probability:
@@ -128,40 +121,44 @@ class DefectGenerator:
                 "defective_parameters": [],
             }
 
-        # В базовом сценарии вносим один дефект.
-        selected_parameter = self.rng.choice(
-            available_parameters
+        # Случайное количество дефектных характеристик.
+        defect_count = self.rng.randint(
+            1,
+            min(
+                self.max_defects_per_product,
+                len(available_parameters),
+            ),
         )
 
-        code = (
-            selected_parameter.get("code")
-            or selected_parameter.get("name")
+        # Выбираем разные характеристики без повторений.
+        selected_parameters = self.rng.sample(
+            available_parameters,
+            defect_count,
         )
 
-        defective_value = self._get_defect_value(
-            selected_parameter
-        )
+        defective_parameters = []
 
-        if defective_value is None:
-            return {
-                "measurements": result,
-                "has_defect": False,
-                "defective_parameters": [],
-            }
+        for parameter in selected_parameters:
+            code = (
+                parameter.get("code")
+                or parameter.get("name")
+            )
 
-        result[code] = defective_value
+            defective_value = self._get_defect_value(parameter)
+
+            if defective_value is None:
+                continue
+
+            result[code] = defective_value
+            defective_parameters.append(code)
 
         return {
             "measurements": result,
-            "has_defect": True,
-            "defective_parameters": [code],
+            "has_defect": bool(defective_parameters),
+            "defective_parameters": defective_parameters,
         }
 
     def generate_batch_defects(self, products, parameters):
-        """
-        Вносит дефекты в список уже сгенерированных изделий.
-        """
-
         results = []
 
         for product in products:

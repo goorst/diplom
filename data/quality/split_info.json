@@ -1,124 +1,87 @@
 {
-    "total_records": 1429,
-    "train_records": 1157,
-    "test_records": 272,
+    "dataset_type": "predictive_process_parameters",
+    "prediction_description": "Прогнозирование качества изделия по технологическим параметрам до измерения",
+    "total_records": 518,
+    "train_records": 340,
+    "validation_records": 78,
+    "test_records": 100,
     "train_experiments": [
-        "05392fd7-a64b-42dd-afe7-c5bea7d871eb",
-        "0a01dc46-ee1e-47d7-8863-94b97fb1a611",
-        "0bb2a7c3-8c25-40e4-800a-d8c4abf59ec0",
-        "0ec99d3f-5832-40e4-ab2c-b109ec518c2b",
-        "1656fd86-c755-458b-9239-70ee1e1b0247",
-        "18586351-1a10-490c-bab7-abf62fd35671",
-        "1b0d3607-b3db-4ef6-b921-a56575f4f419",
-        "2272fc3b-c9a6-426c-93ab-655f423aa553",
-        "3236f155-9eb5-4889-af5f-4036a72a9e1c",
-        "3e12e8a0-90e9-411f-a7bc-d4f376695717",
-        "41b09d23-d7e1-43a6-96f3-7f5049a9e313",
-        "47415f5f-3d1b-4e46-9a6d-084de315dfbd",
-        "4af056a4-f633-431e-be4c-acc312b88c26",
-        "4e240337-f64c-4977-89d1-7335c0a9c858",
-        "541f4568-adb5-4aeb-b690-e5a7dd79435c",
-        "5e0d2a7c-fda8-4949-9111-8d06fdbe62fc",
-        "617f8fbe-d34e-46ce-98fc-6f90857a7e59",
-        "693d193f-1d4e-4bd6-93cd-e2b309850a06",
-        "75c1a58b-b210-42e3-8a4e-386b6773f3c8",
-        "78b0dc86-e7d4-4f93-9803-907f8715a44b",
-        "7afc45d8-311e-4abe-ace4-b5c7878cddaf",
-        "7d9513ba-4fb8-4134-9063-8ffb5e95bdfa",
-        "806361df-b165-424c-b691-48327103e69c",
-        "93c877fd-6912-410c-abbe-5df7dd486756",
-        "a4aeb1dd-6768-4136-b584-2695a023e9d4",
-        "a6888863-8cb8-4555-8858-3e485b38300e",
-        "a6d252d5-5e3d-4cc4-9b58-d931d17b48fd",
-        "a9ca8dfc-4dee-4085-844b-fe79015b0ae6",
-        "aa3452d2-f7a9-4987-a4da-7fcd199ceb6e",
-        "ae2527a7-64eb-415c-a08a-91e12caeb10d",
-        "afac4797-327a-47fa-abf7-0020502c9a66",
-        "b8756d3e-fccf-4f7d-83a6-acd88f5145c3",
-        "c074c625-8435-4489-a870-cce6eef0e519",
-        "c2311239-eb83-4e65-afae-9979633d53e9",
-        "c27eb96f-3910-4699-a0ae-1eb7414b88dd",
-        "c7a13a04-e4a7-4733-b6aa-a11d067a47c3",
-        "c8c45aac-e9cb-4fdf-8a4d-55c4478f801e",
-        "cc409fe0-e3ff-4f82-8d07-4ffedeb4ac20",
-        "ce1eab20-8752-4c2c-8789-f80e1ce1c8ed",
-        "d40b261e-b903-43b3-abf9-5013f4368bee",
-        "d537b543-df3e-4c62-8528-2c195efb4b7c",
-        "d97849bc-0608-4e14-9311-9c623cfb3ba1",
-        "da0a22da-0030-4058-9753-f90223ef3246",
-        "dc9a9f51-8ecb-4f6c-8e20-75ec6ec16372",
-        "df061040-9559-4860-82c9-1329d3106d74",
-        "e586087e-5464-46ed-86ee-c08a55a2459f",
-        "f06bc7e2-cae9-4b37-b1f9-72f9f2e6f46b",
-        "fd49228f-fb1c-4e1a-b1e9-f2a799630204"
+        "07785e30-454e-4e2c-8ac0-02edd77dd5e7",
+        "3cd2150d-8f72-442c-a75f-35e7738d90a2",
+        "45c66df7-774d-40c1-a862-2625083f5ebe",
+        "46a0315b-d506-42b2-bc4b-057431f4795c",
+        "47b641eb-ab2b-4d9b-895e-2df1e2b9aea6",
+        "48c8bbf3-2a2e-43d2-9231-48a2f41a33ae",
+        "5a20b319-63b1-49f0-a67a-5286a0c0caa0",
+        "5caa690f-2821-4374-b3f4-d819516783a1",
+        "6d598830-d28e-48d2-ba04-9b92dc6f9262",
+        "792990d2-167f-4f1e-b39c-7e36a827d788",
+        "7d16fef4-ac92-415b-b546-7bc026450700",
+        "9547600a-a61b-40b0-bd43-7a3d5f5b4528",
+        "9992b2c3-8a00-4db4-b53e-6751352d70df",
+        "a8fdb6d9-0b9a-44bb-8fcf-6e20d7181d33",
+        "b5f324f0-c515-4446-9865-02ab22df0722",
+        "c87483ac-ed13-4a43-a8d7-5c071c11e851",
+        "d0601543-4503-4d9b-bbd9-81ef91f04a92",
+        "e18e6f84-5d63-4bcc-8137-9a399ab40257",
+        "fd42ac5d-1e19-4d7c-8931-b0446f180bfc"
+    ],
+    "validation_experiments": [
+        "3d4e7c7f-4714-4e75-95e9-8c0ca6452425",
+        "75dcfe22-7e64-4dde-82cd-d1bc153c0f50",
+        "94ffda28-1a7a-4aa0-a69c-35bb1df1c35b",
+        "da5abbcd-f16c-4ab5-9493-5a28ce56a724"
     ],
     "test_experiments": [
-        "062f0bad-03a5-44c6-847a-adb79bb72d92",
-        "2d41bc1b-3cd7-477c-8c62-817903243ebe",
-        "31d5636e-d478-43d9-865b-61ad33398913",
-        "3cdc72a8-d7eb-420d-8974-d2b5c7a1ee63",
-        "448aabf4-7853-4e8e-b36c-379f70a0594e",
-        "6a3dfb6f-a230-4bc5-a0dc-2131045dbffe",
-        "78214e3a-d561-49d8-b509-1326241f1ca3",
-        "88775de3-9dc7-4556-8488-8d384eedb5a9",
-        "ac40c7ad-43c3-4cd3-8200-abdc3c8b4214",
-        "bf535c4f-2b9e-44aa-8d1d-36b449600a73",
-        "d15d9b5a-9ec8-44ea-96ff-6c586ae25294"
+        "246bc949-e96c-40b5-9334-bda1f2c33e60",
+        "3a0acae4-6419-4e20-a168-e675e0b2ed19",
+        "6ee9dc34-f865-4698-807c-8676a880e39e",
+        "b41c5b0d-de73-4da3-8aaf-0c07b8846f5b",
+        "d3380006-c00f-4818-864e-a92615831e58"
     ],
     "product_statistics": {
         "3": {
-            "experiments": 27,
-            "records": 597,
-            "good": 334,
-            "defect": 263
+            "experiments": 7,
+            "records": 157,
+            "good": 104,
+            "defect": 53
         },
         "5": {
-            "experiments": 15,
-            "records": 352,
-            "good": 186,
-            "defect": 166
+            "experiments": 16,
+            "records": 256,
+            "good": 56,
+            "defect": 200
         },
         "6": {
-            "experiments": 17,
-            "records": 480,
-            "good": 246,
-            "defect": 234
+            "experiments": 5,
+            "records": 105,
+            "good": 99,
+            "defect": 6
         }
     },
-    "train_products": [
-        "3",
-        "5",
-        "6"
-    ],
-    "test_products": [
-        "3",
-        "5",
-        "6"
-    ],
-    "measurement_features": [
-        "measurement__d25h6",
-        "measurement__d30h6",
-        "measurement__d359",
-        "measurement__d299",
-        "measurement__d",
-        "measurement__D",
-        "measurement__B",
-        "measurement__h80",
-        "measurement__d64",
-        "measurement__d36"
+    "process_features": [
+        "process__cutting_speed",
+        "process__feed_rate",
+        "process__depth_of_cut",
+        "process__tool_wear",
+        "process__vibration"
     ],
     "feature_columns": [
         "product_id",
-        "measurement__d25h6",
-        "measurement__d30h6",
-        "measurement__d359",
-        "measurement__d299",
-        "measurement__d",
-        "measurement__D",
-        "measurement__B",
-        "measurement__h80",
-        "measurement__d64",
-        "measurement__d36"
+        "process__cutting_speed",
+        "process__feed_rate",
+        "process__depth_of_cut",
+        "process__tool_wear",
+        "process__vibration"
+    ],
+    "excluded_features": [
+        "measurement__*",
+        "simulated_defect",
+        "simulated_defective_parameters",
+        "injected_defects",
+        "experiment_id",
+        "run_id",
+        "item_id"
     ],
     "target_column": "target",
     "target_classes": {
@@ -126,11 +89,12 @@
         "DEFECT": 1
     },
     "class_distribution": {
-        "0": 766,
-        "1": 663
+        "0": 259,
+        "1": 259
     },
+    "validation_size": 0.15,
     "test_size": 0.2,
     "random_state": 42,
-    "split_candidates": 500,
-    "split_method": "Stratified group split by product_id and experiment_id with class balancing"
+    "split_candidates": 1000,
+    "split_method": "Group split by experiment_id with approximate class balancing"
 }
